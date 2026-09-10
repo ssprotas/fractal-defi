@@ -119,6 +119,29 @@ def test_gas_cost_per_mint_haircut_on_open():
 
 
 @pytest.mark.core
+def test_gas_cost_per_mint_haircut_on_open_from_pair():
+    """Pair-mode mint is an on-chain mint too: the same flat gas haircut
+    applies, and the minted position is unaffected by it."""
+    lower, upper = 1.0 * 1.0001 ** -1000, 1.0 * 1.0001 ** 1000
+    baseline = UniswapV3LPEntity(config=UniswapV3LPConfig())
+    baseline.update_state(UniswapV3LPGlobalState(price=1.0))
+    baseline.action_open_position_from_pair(100.0, 100.0, lower, upper)
+
+    with_gas = UniswapV3LPEntity(
+        config=UniswapV3LPConfig(gas_cost_per_mint=7.5)
+    )
+    with_gas.update_state(UniswapV3LPGlobalState(price=1.0))
+    with_gas.action_open_position_from_pair(100.0, 100.0, lower, upper)
+
+    assert with_gas._internal_state.cash == pytest.approx(
+        baseline._internal_state.cash - 7.5
+    )
+    assert with_gas._internal_state.liquidity == pytest.approx(
+        baseline._internal_state.liquidity
+    )
+
+
+@pytest.mark.core
 def test_gas_cost_burn_and_collect_haircut_on_close():
     """``gas_cost_per_burn + gas_cost_per_collect`` is deducted on close."""
     cfg = UniswapV3LPConfig(gas_cost_per_burn=4.0, gas_cost_per_collect=3.0)

@@ -6,19 +6,100 @@ with one-line bullets per change.
 
 ## [Unreleased]
 
+Uniswap V3 LP replication backtesting: exact per-leg fee accrual from
+the pool's own `feeGrowthGlobal` counters, validated 1:1 against real
+on-chain positions on Base (all 13 within 0.06% of the chain's
+`feeGrowthInside` accrual over a two-month window). Default behaviour
+of existing strategies is unchanged: the new fee model only engages
+when the observations carry `fee_growth0/1`.
+
 ### Added
 
+- **`UniswapV3LPConfig.fee_model`** — `"auto"` (default) / `"aggregate"`
+  / `"fee_growth"`. `fee_growth` accrues `Δ feeGrowthGlobal × L` per
+  bar per token leg (the chain's own liquidity weighting, protocol fee
+  already net); `aggregate` is the legacy `fees × L_pos/(L_pool+L_pos)`
+  estimate; `auto` picks per bar by presence of the feeGrowth fields.
+- **`UniswapV3LPConfig.protocol_fee`** — fraction of swap fees taken by
+  the protocol (`slot0.feeProtocol`; 1/4 or 1/6 on Base pools), applied
+  to the `aggregate` model only.
+- **`UniswapV3LPEntity.action_open_position_from_pair`** — mint from
+  exact `(token0, token1)` amounts with no swap and no fee, replicating
+  a real on-chain mint 1:1. `fees_token0` / `fees_token1` added to the
+  internal state; `price_to_tick` / `tick_to_price` are now static and
+  take decimals.
+- **`fractal.core.entities.models.uniswap_v3_fees`** — `tick_to_price`,
+  `liquidity_to_onchain`, `fees_from_growth`,
+  `position_fees_from_growth` helpers.
+- **`FixedRangeLiquidityProvision`** strategy — passive fixed-range LP
+  (zap-in or exact-pair mint on the first observation, then hold).
+- **`UniswapV3BasePoolHourDataLoader`** — native `poolHourDatas`
+  snapshots on Base with `price` from the hourly tick and per-bar
+  `fee_growth0/1` deltas (non-monotonic counter dips are clamped with a
+  warning).
+- **`UniswapV3SwapsLoader`** (`fractal.loaders.onchain`) — per-swap
+  `Swap` events over a block range via `eth_getLogs`, with adaptive
+  chunking; returns the new `SwapsHistory` struct.
+- **`AerodromeSlipstreamPoolHourDataLoader`** — Aerodrome Slipstream
+  (Base) hourly pool snapshots.
+- **`PoolHistory.fee_growth0/1`** optional columns; **`SwapsHistory`**
+  struct.
+- **`UniswapV3Loader.get_pool_info`** — pool static config (fee tier,
+  symbols, decimals) from the subgraph; the Arbitrum (Messari schema)
+  loader overrides it.
+- **`examples/dex_replication_backtest/`** — 13 real Base positions
+  replayed with `fee_model="fee_growth"` and compared per leg against
+  on-chain ground truth, plus a three-method comparison grid
+  (`fee_growth` / `aggregate` / per-event replay).
 - **`UniswapV3LPConfig.gas_cost_per_mint` / `gas_cost_per_burn` /
   `gas_cost_per_collect`** — three optional flat-cost fields (notional
   units, default `0.0`) deducted from `cash` on `action_open_position`
-  (mint) and `action_close_position` (burn + collect). Lets backtests
-  model L1 / L2 transaction costs additively on top of `pool_fee_rate`
-  and `slippage_pct`. Chain-agnostic: caller is responsible for
-  converting `gas_units × gas_price × native_token_price` into notional.
-  Defaults preserve byte-identical behaviour for existing configs (locked
-  in by `test_v3_zero_gas_default_is_parity_with_legacy`).
+  / `action_open_position_from_pair` (mint) and `action_close_position`
+  (burn + collect). Lets backtests model L1 / L2 transaction costs
+  additively on top of `pool_fee_rate` and `slippage_pct`.
+  Chain-agnostic: caller converts `gas_units × gas_price ×
+  native_token_price` into notional. Defaults preserve byte-identical
+  behaviour for existing configs (locked in by
+  `test_v3_zero_gas_default_is_parity_with_legacy`).
+- **`StrategyMetrics.cagr`** — compound annual growth rate
+  (`(1 + accumulated_return) ** (1 / years) - 1`, `-1.0` when wiped
+  out) next to the unchanged linear `apy`, so existing grid results
+  stay comparable. Logged to MLflow alongside `apy` (mean / q05 / q95 /
+  cvar05 aggregates included).
 
+### Changed
 
+- **Dependency floors raised** (`setup.py` and `requirements.txt` kept in
+  sync; the pre-commit pylint hook pins follow): runtime
+  `mlflow>=3.12.0` (was `>=3.11.1`), `requests>=2.34.0` (was
+  `>=2.33.1`); dev tooling `pytest>=9.1.1`, `pytest-cov>=7.1.0`,
+  `pylint>=4.0.6`, `pre-commit>=4.6.1`; release tooling `build>=1.5.1`,
+  `twine>=7.0.0`. CI actions bumped to `checkout@v7`, `setup-python@v7`,
+  `cache@v6`, `codecov-action@v7`. `examples/agentic_trader` pins moved
+  to `openai-agents==0.17.7` and `dash==4.3.0`. Supersedes the
+  dependabot PRs #80, #90–#95.
+- **`UniswapV3Loader.get_pool_decimals`** is now concrete and delegates
+  to `get_pool_info`; the Ethereum loader no longer overrides it.
+- **`UniswapV3LPEntity.update_state`** additionally validates
+  `fee_growth0/1 >= 0` when a position is open.
+
+### Fixed
+
+- **Loaders no longer silently zero missing data.** `AaveV3RatesLoader.read`
+  raises `ValueError` when a lending/borrowing leg carries NaN (the
+  outer merge of the supply and borrow series could leave a gap that
+  became a `0.0` rate) and warns when the requested window exceeds
+  what the subgraph serves; `BinanceFundingLoader.transform` raises on
+  non-numeric funding rates instead of coercing them to `0.0`.
+- **`SimplePerpEntity` liquidates at `balance <= maintenance_margin`**
+  (was strict `<`), matching the Hyperliquid entity.
+- **Negative `tvlUSD` from the uniswap-v3 subgraph** (a derived field
+  that can dip below zero on accounting glitches; observed on Base V3
+  pools) no longer crashes LP backtests on entity validation: the
+  TheGraph pool loaders clamp it to 0 with a warning naming the pool
+  and bar, mirroring the non-monotonic feeGrowth treatment.
+
+## [v1.3.2] — 2026-05-06
 
 Citation infrastructure for academic use. No functional code changes;
 existing strategies, entities, loaders and pipeline behaviour are

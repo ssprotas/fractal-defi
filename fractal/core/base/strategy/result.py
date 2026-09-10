@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -14,9 +15,13 @@ class StrategyMetrics:
     Default metrics of the strategy.
     """
     accumulated_return: float  # total return of the strategy
-    apy: float                 # annualized return
+    apy: float                 # annualized return, linear: ``accumulated_return / years``
     sharpe: float              # risk-adjusted return
     max_drawdown: float        # maximum drawdown
+    # Compound annual growth rate: ``(1 + accumulated_return) ** (1 / years) - 1``.
+    # ``-1.0`` when the balance is wiped out. Kept separate from ``apy`` so
+    # existing grid results and dashboards stay comparable.
+    cagr: float = 0.0
 
 
 @dataclass
@@ -83,6 +88,7 @@ class StrategyResult:
 
         accumulated_return: float = data['net_balance'].iloc[-1] / first_balance - 1
         apy = accumulated_return / total_years
+        cagr = self._compound_annual_growth(accumulated_return, total_years)
         data_frequency = len(data) / total_years
 
         returns = data['net_balance'].pct_change().dropna()
@@ -103,13 +109,31 @@ class StrategyResult:
             accumulated_return=accumulated_return,
             apy=apy,
             sharpe=sharpe,
-            max_drawdown=max_drawdown
+            max_drawdown=max_drawdown,
+            cagr=cagr,
         )
+
+    @staticmethod
+    def _compound_annual_growth(accumulated_return: float, total_years: float) -> float:
+        """CAGR of ``accumulated_return`` over ``total_years``.
+
+        ``-1.0`` once the balance is wiped out (growth factor <= 0). Very
+        short windows push the annualised log-growth beyond what ``exp``
+        can represent; there the linear annualisation is returned instead
+        of overflowing.
+        """
+        growth = 1.0 + accumulated_return
+        if growth <= 0:
+            return -1.0
+        log_annual = math.log(growth) / total_years
+        if abs(log_annual) > 700:
+            return accumulated_return / total_years
+        return math.expm1(log_annual)
 
     @staticmethod
     def _zero_metrics() -> "StrategyMetrics":
         return StrategyMetrics(
-            accumulated_return=0.0, apy=0.0, sharpe=0.0, max_drawdown=0.0,
+            accumulated_return=0.0, apy=0.0, sharpe=0.0, max_drawdown=0.0, cagr=0.0,
         )
 
     def get_default_metrics(self) -> StrategyMetrics:
